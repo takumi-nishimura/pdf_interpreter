@@ -1,3 +1,4 @@
+#! /usr/bin/env python
 from typing import Iterable, List, Optional
 
 from dotenv import load_dotenv

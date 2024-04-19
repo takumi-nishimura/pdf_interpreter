@@ -1,7 +1,7 @@
-from typing import Any, Iterable, List, Optional
+from typing import Iterable, List, Optional
 
 from dotenv import load_dotenv
-from langchain.callbacks.base import BaseCallbackHandler
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 from langchain.chains import RetrievalQA
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
@@ -89,23 +89,6 @@ class OpenAIEmbeddings(OpenAIEmbeddings):
         return embeddings
 
 
-class StreamHandler(BaseCallbackHandler):
-    def __init__(self, initial_text=""):
-        self.text = initial_text
-        self.cnt = 0
-
-    def on_llm_start(self, *args: Any, **kwargs: Any) -> None:
-        print("\n---Question", self.cnt, " start---")
-
-    def on_llm_new_token(self, token: str, **kwargs) -> None:
-        self.text += token
-        print(token, end="")
-
-    def on_llm_end(self, *args: Any, **kwargs: Any) -> None:
-        print("\n---Question", self.cnt, " end---")
-        self.cnt += 1
-
-
 def main():
     load_dotenv()
     filename = "pdf_interpreter/test_en.pdf"
@@ -130,13 +113,12 @@ def main():
     )
     qdrant.add_documents(docs)
 
-    stream_handler = StreamHandler()
     llm = ChatOpenAI(
         model="llama-cpp-model",
         temperature=0.2,
-        max_tokens=512,
+        max_tokens=4048,
         streaming=True,
-        callbacks=[stream_handler],
+        callbacks=[StreamingStdOutCallbackHandler()],
     )
     retriever = qdrant.as_retriever(
         search_type="similarity", search_kwargs={"k": 4}

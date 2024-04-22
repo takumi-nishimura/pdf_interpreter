@@ -1,5 +1,4 @@
 # PDF_Interpreter
-English pdf only.  
 Support for llama-cpp-python http server with langchain.  
 
 ## Instalation
@@ -13,5 +12,5 @@ Support for llama-cpp-python http server with langchain.
    ```
 1. Run code.
    ```
-    poetry run python pdf_interpreter/main.py 
+   streamlit run pdf_interpreter/main.py
    ```

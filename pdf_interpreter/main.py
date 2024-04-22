@@ -1,13 +1,24 @@
-#! /usr/bin/env python
-from typing import Iterable, List, Optional
+import io
+import threading
+from queue import Queue
+from typing import Any, Iterable, List, Optional
 
+import requests
+import streamlit as st
 from dotenv import load_dotenv
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+from langchain.callbacks.base import BaseCallbackHandler
 from langchain.chains import RetrievalQA
-from langchain.text_splitter import CharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
+from langchain.prompts.chat import ChatPromptTemplate
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Qdrant
+from langchain_core.output_parsers.string import StrOutputParser
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from openai import OpenAI
+from pdfminer.converter import TextConverter
+from pdfminer.high_level import extract_text
+from pdfminer.layout import LAParams
+from pdfminer.pdfinterp import PDFPageInterpreter, PDFResourceManager
+from pdfminer.pdfpage import PDFPage
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
@@ -22,7 +33,7 @@ class OpenAIEmbeddings(OpenAIEmbeddings):
         texts: List[str],
         *,
         engine: str,
-        chunk_size: Optional[int] = None
+        chunk_size: Optional[int] = None,
     ) -> List[List[float]]:
 
         chunk_size = 30
@@ -90,59 +101,137 @@ class OpenAIEmbeddings(OpenAIEmbeddings):
         return embeddings
 
 
-def main():
-    load_dotenv()
-    filename = "pdf_interpreter/test_en.pdf"
-    pdf_doc = PyPDFLoader(filename).load()
-    text_splitter = CharacterTextSplitter(chunk_size=512, chunk_overlap=128)
-    docs = text_splitter.split_documents(pdf_doc)
+class StreamQueueHandler(BaseCallbackHandler):
+    def __init__(self):
+        self.stream_queue = Queue()
 
-    client = QdrantClient(":memory:")
-    collections = client.get_collections().collections
-    collection_names = [collection.name for collection in collections]
-    collection_name = filename
-    if collection_name not in collection_names:
-        client.create_collection(
-            collection_name=collection_name,
+    def on_llm_new_token(self, token: str, **kwargs: Any):
+        self.stream_queue.put({"event": "new_token", "token": token})
+
+    def on_llm_end(self, *args, **kwargs):
+        self.stream_queue.put({"event": "end", "token": ""})
+
+
+def load_pdf_from_url(pdf_url):
+    response = requests.get(pdf_url)
+    response.raise_for_status()
+    with io.BytesIO(response.content) as open_pdf_file:
+        rsrcmgr = PDFResourceManager()
+        retstr = io.StringIO()
+        laparams = LAParams()
+        device = TextConverter(rsrcmgr, retstr, laparams=laparams)
+        interpreter = PDFPageInterpreter(rsrcmgr, device)
+        for page in PDFPage.get_pages(open_pdf_file):
+            interpreter.process_page(page)
+            text = retstr.getvalue()
+        device.close()
+        retstr.close()
+    return text, response.headers["ETag"]
+
+
+def qdrant_client(texts, name):
+    _client = QdrantClient(":memory:")
+    _collections = _client.get_collections().collections
+    _collection_names = [_collection.name for _collection in _collections]
+    _collection_name = name
+    if _collection_name not in _collection_names:
+        _client.create_collection(
+            collection_name=_collection_name,
             vectors_config=VectorParams(size=4096, distance=Distance.COSINE),
         )
-
-    qdrant = Qdrant(
-        client=client,
-        collection_name=collection_name,
+    _qdrant = Qdrant(
+        client=_client,
+        collection_name=_collection_name,
         embeddings=OpenAIEmbeddings(),
     )
-    qdrant.add_documents(docs)
-
-    llm = ChatOpenAI(
-        model="llama-cpp-model",
-        temperature=0.2,
-        max_tokens=4048,
-        streaming=True,
-        callbacks=[StreamingStdOutCallbackHandler()],
-    )
-    retriever = qdrant.as_retriever(
+    _qdrant.add_texts(texts)
+    return _qdrant.as_retriever(
         search_type="similarity", search_kwargs={"k": 4}
     )
 
-    qa = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=retriever,
-        return_source_documents=True,
+
+@st.cache_resource
+def load_embeddings(file):
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=512, chunk_overlap=128
     )
-
-    questions = [
-        "What is this paper about?",
-        "What's so great about it compared to previous research?",
-        "What is the key to the technique or method?",
-        "How does it validate the proposed method?",
-        "Is there any discussion of this paper?",
-        "What paper should I read next to better understand this paper?",
-    ]
-    for question in questions:
-        qa(question)
+    pdf_text = extract_text(file)
+    texts = text_splitter.split_text(pdf_text)
+    retriever = qdrant_client(texts, pdf_file.name)
+    return retriever
 
 
-if __name__ == "__main__":
-    main()
+def get_response(query, chat_history, retriever):
+    template = """
+    あなたは優秀なアシスタントです．会話の履歴に基づき，応答してください．
+    会話の履歴: {chat_history}
+    質問: {user_question}
+    """
+
+    if not retriever:
+        prompt = ChatPromptTemplate.from_template(template)
+        chain = prompt | ChatOpenAI(streaming=True) | StrOutputParser()
+        return chain.stream(
+            {"chat_history": chat_history, "user_question": query}
+        )
+    else:
+        handler = StreamQueueHandler()
+        qa = RetrievalQA.from_chain_type(
+            llm=ChatOpenAI(streaming=True, callbacks=[handler]),
+            chain_type="stuff",
+            retriever=retriever,
+        )
+
+        threading.Thread(
+            target=qa,
+            args=({"query": query, "chat_history": chat_history},),
+        ).start()
+
+        def qa_stream():
+            _stream = {"event": "not_yet", "token": ""}
+            while not _stream["event"] == "end":
+                _stream = handler.stream_queue.get()
+                yield _stream["token"]
+
+        return qa_stream()
+
+
+load_dotenv()
+
+st.set_page_config(layout="wide")
+st.title("PDF Interpreter")
+emb_retriever = None
+
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
+
+option = st.radio(
+    "Choose an option:", ("Enter a PDF URL", "Upload a PDF file")
+)
+if option == "Enter a PDF URL":
+    pdf_url = st.text_input("Enter PDF URL here.")
+    if pdf_url:
+        pdf_text, name = load_pdf_from_url(pdf_url)
+elif option == "Upload a PDF file":
+    pdf_file = st.file_uploader("Upload PDF here.", type=["pdf"])
+    if pdf_file:
+        with st.spinner("Loading PDF..."):
+            emb_retriever = load_embeddings(pdf_file)
+for message in st.session_state["messages"]:
+    if message["role"] == "user":
+        with st.chat_message("user"):
+            st.markdown(message["content"])
+    elif message["role"] == "assistant":
+        with st.chat_message("assistant"):
+            st.markdown(message["content"])
+if prompt := st.chat_input("Ask me anything!"):
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    st.session_state["messages"].append({"role": "user", "content": prompt})
+    with st.chat_message("assistant"):
+        response = st.write_stream(
+            get_response(prompt, st.session_state["messages"], emb_retriever)
+        )
+    st.session_state["messages"].append(
+        {"role": "assistant", "content": response}
+    )

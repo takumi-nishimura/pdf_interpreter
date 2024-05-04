@@ -1,4 +1,5 @@
 import io
+import os
 import threading
 from queue import Queue
 from typing import Any, Iterable, List, Optional
@@ -13,7 +14,6 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Qdrant
 from langchain_core.output_parsers.string import StrOutputParser
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from openai import OpenAI
 from pdfminer.converter import TextConverter
 from pdfminer.high_level import extract_text
 from pdfminer.layout import LAParams
@@ -21,6 +21,8 @@ from pdfminer.pdfinterp import PDFPageInterpreter, PDFResourceManager
 from pdfminer.pdfpage import PDFPage
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
+
+OPENAI_API_MODEL = os.environ.get("OPENAI_API_MODEL")
 
 
 class OpenAIEmbeddings(OpenAIEmbeddings):
@@ -95,8 +97,8 @@ class OpenAIEmbeddings(OpenAIEmbeddings):
                     for embedding in zip(*_result)
                 ]
 
-            magnitude = sum(val**2 for val in average) ** 0.5
-            embeddings[i] = [val / magnitude for val in average]
+            magnitude = sum(val**2 for val in average[0]) ** 0.5
+            embeddings[i] = [val / magnitude for val in average[0]]
 
         return embeddings
 
@@ -163,21 +165,27 @@ def load_embeddings(file):
 
 def get_response(query, chat_history, retriever):
     template = """
-    あなたは優秀なアシスタントです．会話の履歴に基づき，応答してください．
+    あなたは優秀なアシスタントです．会話の履歴に基づき，800字程度で応答してください．
     会話の履歴: {chat_history}
     質問: {user_question}
     """
 
     if not retriever:
         prompt = ChatPromptTemplate.from_template(template)
-        chain = prompt | ChatOpenAI(streaming=True) | StrOutputParser()
+        chain = (
+            prompt
+            | ChatOpenAI(streaming=True, model=OPENAI_API_MODEL)
+            | StrOutputParser()
+        )
         return chain.stream(
             {"chat_history": chat_history, "user_question": query}
         )
     else:
         handler = StreamQueueHandler()
         qa = RetrievalQA.from_chain_type(
-            llm=ChatOpenAI(streaming=True, callbacks=[handler]),
+            llm=ChatOpenAI(
+                streaming=True, callbacks=[handler], model=OPENAI_API_MODEL
+            ),
             chain_type="stuff",
             retriever=retriever,
         )
@@ -215,8 +223,7 @@ if option == "Enter a PDF URL":
 elif option == "Upload a PDF file":
     pdf_file = st.file_uploader("Upload PDF here.", type=["pdf"])
     if pdf_file:
-        with st.spinner("Loading PDF..."):
-            emb_retriever = load_embeddings(pdf_file)
+        emb_retriever = load_embeddings(pdf_file)
 for message in st.session_state["messages"]:
     if message["role"] == "user":
         with st.chat_message("user"):

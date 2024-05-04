@@ -13,6 +13,21 @@ from qdrant_client.models import Distance, VectorParams
 
 
 class OpenAIEmbeddings(OpenAIEmbeddings):
+    """
+    A class for generating embeddings using OpenAI models.
+
+    Args:
+        *args: Variable length argument list.
+        **kwargs: Arbitrary keyword arguments.
+
+    Attributes:
+        show_progress_bar (bool): Flag indicating whether to show a progress bar.
+
+    Methods:
+        _get_len_safe_embeddings: Generates embeddings for a list of texts.
+
+    """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.show_progress_bar = True
@@ -24,6 +39,18 @@ class OpenAIEmbeddings(OpenAIEmbeddings):
         engine: str,
         chunk_size: Optional[int] = None
     ) -> List[List[float]]:
+        """
+        Generates embeddings for a list of texts.
+
+        Args:
+            texts (List[str]): The list of texts to generate embeddings for.
+            engine (str): The engine to use for generating embeddings.
+            chunk_size (Optional[int]): The size of each chunk of text. Defaults to None.
+
+        Returns:
+            List[List[float]]: The generated embeddings for each text.
+
+        """
 
         chunk_size = 30
         chunks = []
